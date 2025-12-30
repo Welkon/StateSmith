@@ -80,6 +80,10 @@ public class AlgoTests
                 if (transpilerId == TranspilerId.Cpp && algoId != AlgorithmId.Balanced2)
                     continue;
 
+                // Table1 only supports C99 right now.
+                if (algoId == AlgorithmId.Table1 && transpilerId != TranspilerId.C99)
+                    continue;
+
                 var dirName = $"{outDir}/{algoId}_{transpilerId}";
                 Directory.CreateDirectory(dirName);
                 TestHelper.RunSmRunnerForPlantUmlString(plantUmlText: MinimalPlantUmlFsm, outputDir: dirName, algorithmId: algoId, transpilerId: transpilerId);
