@@ -10,3 +10,14 @@ example-output/render2
 
 src/StateSmith.CliTest/Run/examples/1/statesmith.runinfo.json
 
+_bmad
+_bmad_output
+.agent
+.claude
+.codex
+.lean-spec
+/specs
+.mcp.json
+AGENTS.md
+CLAUDE.md
+GEMINI.md

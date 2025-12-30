@@ -37,10 +37,20 @@ public class AlgoTranspilerCustomizer
                 sp.AddSingletonT<IGilAlgo, AlgoBalanced2>();
                 break;
 
+            case AlgorithmId.Table1:
+                sp.AddSingletonT<IGilAlgo, StateSmith.Output.Algos.Table1.AlgoTable1>();
+                break;
+
             default: throw new ArgumentException("Unknown algorithmId: " + algorithmId);
         }
 
         algoBalanced1Settings.outputSwitchDefault = false;  // default to false. Needed because of default case below.
+
+        // Table1 currently only supports C99 transpiler
+        if (algorithmId == AlgorithmId.Table1 && transpilerId != TranspilerId.C99 && transpilerId != TranspilerId.Default)
+        {
+            throw new Exception($"Table1 algorithm currently only supports C99 transpiler. You selected {transpilerId}. Please use TranspilerId.C99 or reply to https://github.com/StateSmith/StateSmith/issues/");
+        }
 
         switch (transpilerId)
         {

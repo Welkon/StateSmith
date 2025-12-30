@@ -26,6 +26,7 @@ public class C99GenVisitor : CSharpSyntaxWalker
     private StringBuilder sb;
     protected readonly SemanticModel model;
     protected bool renderingPrototypes = false;
+    protected bool processingStaticReadonlyArray = false;
     protected readonly RenderConfigBaseVars renderConfig;
     protected readonly RenderConfigCVars renderConfigC;
     protected readonly IGilToC99Customizer customizer;
@@ -210,9 +211,16 @@ public class C99GenVisitor : CSharpSyntaxWalker
         sb = hFileSb;
         OutputStruct(node, name);
 
+        // Output extern const declarations for public static readonly arrays to .h file
+        sb = hFileSb;
+        OutputExternArrayDeclarations(node, name);
+
         sb = cFileSb;
         publicSb = cFileSb;
         privateSb = cFileSb;
+
+        // Output static readonly array fields as static const arrays to .c file
+        OutputStaticReadonlyArrayFields(node, name);
 
         foreach (var kid in node.ChildNodes().OfType<ConstructorDeclarationSyntax>())
         {
@@ -598,7 +606,61 @@ public class C99GenVisitor : CSharpSyntaxWalker
         }
     }
 
+    public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
+    {
+        // Only skip "new Type" for static readonly array initializers
+        if (processingStaticReadonlyArray && node.Initializer != null)
+        {
+            // For object creation in static array initializers, skip "new Type" and only output the initializer
+            // Converts: new StateTransition { field1 = val1, field2 = val2 }
+            // To: { val1, val2 }
+            Visit(node.Initializer);
+        }
+        else
+        {
+            // For all other cases, use default behavior
+            base.VisitObjectCreationExpression(node);
+        }
+    }
 
+    public override void VisitInitializerExpression(InitializerExpressionSyntax node)
+    {
+        // Only convert object initializers to positional initializers for static readonly arrays
+        if (processingStaticReadonlyArray && node.IsKind(SyntaxKind.ObjectInitializerExpression))
+        {
+            // Object initializer in static array - extract only the values
+            // Converts: { field1 = val1, field2 = val2 }
+            // To: { val1, val2 }
+            VisitLeadingTrivia(node.OpenBraceToken);
+            sb.Append("{ ");
+
+            bool first = true;
+            foreach (var expression in node.Expressions)
+            {
+                if (!first)
+                    sb.Append(", ");
+                first = false;
+
+                // Each expression should be an AssignmentExpression
+                if (expression is AssignmentExpressionSyntax assignment)
+                {
+                    Visit(assignment.Right);  // Only visit the value, not the property name
+                }
+                else
+                {
+                    Visit(expression);  // Fallback for other expression types
+                }
+            }
+
+            sb.Append(" }");
+            VisitTrailingTrivia(node.CloseBraceToken);
+        }
+        else
+        {
+            // Array or collection initializer - use default behavior
+            base.VisitInitializerExpression(node);
+        }
+    }
 
     public override void VisitIdentifierName(IdentifierNameSyntax node)
     {
@@ -686,6 +748,12 @@ public class C99GenVisitor : CSharpSyntaxWalker
         if (transpilerHelper.HandleGilSpecialFieldDeclarations(node, sb))
             return;
 
+        // Skip static readonly array fields - they will be output as file-scope static const arrays
+        if (IsStaticReadonlyArrayField(node))
+        {
+            return; // Don't output to struct
+        }
+
         bool done = false;
         bool useDefine = false;
         bool useEnum = true;
@@ -716,6 +784,172 @@ public class C99GenVisitor : CSharpSyntaxWalker
         if (!done)
         {
             base.VisitFieldDeclaration(node);
+        }
+    }
+
+    private bool IsStaticReadonlyArrayField(FieldDeclarationSyntax node)
+    {
+        // Check if field has both 'static' and 'readonly' modifiers
+        bool hasStatic = node.Modifiers.Any(m => m.IsKind(SyntaxKind.StaticKeyword));
+        bool hasReadonly = node.Modifiers.Any(m => m.IsKind(SyntaxKind.ReadOnlyKeyword));
+
+        // Check if the type is an array
+        bool isArray = node.Declaration.Type is ArrayTypeSyntax;
+
+        return hasStatic && hasReadonly && isArray;
+    }
+
+    private void OutputStaticReadonlyArrayFields(ClassDeclarationSyntax node, string className)
+    {
+        foreach (var field in node.ChildNodes().OfType<FieldDeclarationSyntax>())
+        {
+            if (!IsStaticReadonlyArrayField(field))
+                continue;
+
+            var arrayType = (ArrayTypeSyntax)field.Declaration.Type;
+
+            // Support multiple variables in one declaration
+            foreach (var variableDeclarator in field.Declaration.Variables)
+            {
+                // Output leading comments (only for first variable)
+                if (variableDeclarator == field.Declaration.Variables.First())
+                {
+                    AppendNodeLeadingTrivia(field);
+                }
+
+                // Output: static const <elementType> <className>_<fieldName>[]
+                sb.Append("static const ");
+                Visit(arrayType.ElementType);  // Output element type (e.g., Blinky1Sm_StateId)
+                sb.Append($" {className}_{variableDeclarator.Identifier.Text}");
+
+                // Support multi-dimensional arrays
+                foreach (var rankSpecifier in arrayType.RankSpecifiers)
+                {
+                    sb.Append('[');
+                    // For first dimension, omit size (C99 allows this for static const arrays)
+                    // For additional dimensions, we'd need explicit sizes
+                    if (rankSpecifier.Rank > 1)
+                    {
+                        throw new InvalidOperationException(
+                            $"Multi-dimensional arrays beyond 1D are not yet supported for static readonly arrays. " +
+                            $"Field: {variableDeclarator.Identifier.Text}");
+                    }
+                    sb.Append(']');
+                }
+
+                // Handle initializer with validation
+                if (variableDeclarator.Initializer == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Static readonly array field '{variableDeclarator.Identifier.Text}' must have an initializer. " +
+                        $"C99 does not allow static const arrays without initialization.");
+                }
+
+                var initValue = variableDeclarator.Initializer.Value;
+                sb.Append(" = ");
+
+                // Set context flag before visiting initializer
+                processingStaticReadonlyArray = true;
+                try
+                {
+                    // Handle array creation expression: new Type[] { ... }
+                    if (initValue is ArrayCreationExpressionSyntax arrayCreation)
+                    {
+                        if (arrayCreation.Initializer != null)
+                        {
+                            Visit(arrayCreation.Initializer);  // Visit the initializer list
+                        }
+                        else
+                        {
+                            throw new InvalidOperationException(
+                                $"Array creation for '{variableDeclarator.Identifier.Text}' must have an initializer.");
+                        }
+                    }
+                    else if (initValue is ImplicitArrayCreationExpressionSyntax implicitArray)
+                    {
+                        if (implicitArray.Initializer != null)
+                        {
+                            Visit(implicitArray.Initializer);
+                        }
+                        else
+                        {
+                            throw new InvalidOperationException(
+                                $"Implicit array creation for '{variableDeclarator.Identifier.Text}' must have an initializer.");
+                        }
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException(
+                            $"Unsupported initializer type for static readonly array '{variableDeclarator.Identifier.Text}'. " +
+                            $"Expected ArrayCreationExpression or ImplicitArrayCreationExpression.");
+                    }
+                }
+                finally
+                {
+                    // Always reset context flag
+                    processingStaticReadonlyArray = false;
+                }
+
+                sb.AppendLine(";");
+                sb.AppendLine();
+            }
+        }
+    }
+
+    private void OutputExternArrayDeclarations(ClassDeclarationSyntax node, string className)
+    {
+        // Output extern const declarations for public/internal static readonly arrays
+        bool hasAnyPublicArray = false;
+
+        foreach (var field in node.ChildNodes().OfType<FieldDeclarationSyntax>())
+        {
+            if (!IsStaticReadonlyArrayField(field))
+                continue;
+
+            // Check if field is public or internal (not private)
+            bool isPublic = field.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword));
+            bool isInternal = field.Modifiers.Any(m => m.IsKind(SyntaxKind.InternalKeyword));
+            bool isPrivate = field.Modifiers.Any(m => m.IsKind(SyntaxKind.PrivateKeyword));
+
+            // Default accessibility for class members is private
+            bool shouldExport = isPublic || isInternal;
+            if (!shouldExport && !isPrivate)
+            {
+                // No explicit accessibility modifier - assume private for class members
+                shouldExport = false;
+            }
+
+            if (!shouldExport)
+                continue;
+
+            if (!hasAnyPublicArray)
+            {
+                sb.AppendLine();
+                sb.AppendLine("// Extern declarations for public/internal static arrays");
+                hasAnyPublicArray = true;
+            }
+
+            var arrayType = (ArrayTypeSyntax)field.Declaration.Type;
+
+            foreach (var variableDeclarator in field.Declaration.Variables)
+            {
+                sb.Append("extern const ");
+                Visit(arrayType.ElementType);
+                sb.Append($" {className}_{variableDeclarator.Identifier.Text}");
+
+                // Output array brackets
+                foreach (var rankSpecifier in arrayType.RankSpecifiers)
+                {
+                    sb.Append("[]");
+                }
+
+                sb.AppendLine(";");
+            }
+        }
+
+        if (hasAnyPublicArray)
+        {
+            sb.AppendLine();
         }
     }
 

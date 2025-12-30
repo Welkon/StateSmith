@@ -64,7 +64,9 @@ public class SimWebGenerator
         DiServiceProvider simDiServiceProvider;
 
         var enablePreDiagramBasedSettings = false;  // need to stop it from trying to read diagram early as fake diagram path is used
-        runner = new(diagramPath: "placeholder-updated-in-generate-method.txt", renderConfig: new SimRenderConfig(), transpilerId: TranspilerId.JavaScript, algorithmId: mainRunnerSettings.algorithmId, enablePDBS: enablePreDiagramBasedSettings);
+        // SimWebGenerator always uses JavaScript transpiler, so algorithms that don't support JavaScript (like Table1) should fall back to default
+        var simAlgorithmId = (mainRunnerSettings.algorithmId == AlgorithmId.Table1) ? AlgorithmId.Default : mainRunnerSettings.algorithmId;
+        runner = new(diagramPath: "placeholder-updated-in-generate-method.txt", renderConfig: new SimRenderConfig(), transpilerId: TranspilerId.JavaScript, algorithmId: simAlgorithmId, enablePDBS: enablePreDiagramBasedSettings);
         runner.Settings.propagateExceptions = true;
         runner.Settings.stateMachineName = mainRunnerSettings.stateMachineName;  // copy over the state machine name
 
