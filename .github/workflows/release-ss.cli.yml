@@ -35,6 +35,7 @@ jobs:
         run: dotnet restore src/StateSmith.sln
 
       - name: Build And Publish Nuget
+        continue-on-error: true
         run: |
           dotnet pack src/StateSmith.Cli/StateSmith.Cli.csproj -c Release -p:Version=$semver
           dotnet nuget push src/StateSmith.Cli/nupkg/StateSmith.Cli.$semver.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
@@ -71,7 +72,15 @@ jobs:
             rm -rf $staging
           done
 
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: statesmith-cli-binaries-${{ env.semver }}
+          path: /tmp/publish/*
+          retention-days: 90
+
       - name: Release
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           files: /tmp/publish/*
